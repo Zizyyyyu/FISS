@@ -1,6 +1,6 @@
 from tkinter import N
 from turtle import pd
-
+import copy
 from FC import FC_model
 import torch
 import random
@@ -101,12 +101,15 @@ def main(args):
         model_temp = FC_model(client_index, args.batch_size, args.num_workers, args.loss_de, args.pod, world_size, rank, device, args.entropy_threshold)
         models.append(model_temp)
 
+    old_global_model=None
+    global_gmm_pool={}
 
     old_step = -1
 
     for ep_g in range(args.epochs_global): 
 
-        current_step = ep_g // args.steps_global 
+        current_step = ep_g // args.steps_global
+        is_task_final_round=((ep_g+1)%args.steps_global==0)
 
         if current_step != old_step: 
             test_dst, n_classes = get_testset(args, current_step)
@@ -119,7 +122,11 @@ def main(args):
             val_metrics = StreamSegMetrics(n_classes)
 
 
-        if current_step != old_step and old_step != -1: 
+        if current_step != old_step and old_step != -1:
+            old_global_model=copy.deepcopy(model_g)
+            old_global_model.eval()
+            for param in old_global_model.parameters():
+                param.requires_grad=False
             args.base_weights = False
     
             for i in range(num_clients):

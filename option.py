@@ -92,7 +92,11 @@ def args_parser():
     parser.add_argument("--seed", type=int, default=2023, help="random seed (default: 2023)")
     parser.add_argument("--use_entropy_detection", action="store_true", default=False)
     parser.add_argument("--entropy_threshold", type=float, default=0.6, help="threshold for entropy detection")
-    
+    parser.add_argument("--gmm_components",type=int,default=3,help="number of Gaussian components for each class")
+    parser.add_argument("--gmm_min_features",type=int,default=30,help="minimum number of features required to fit a class GMM")
+    parser.add_argument("--gmm_max_features",type=int,default=20000,help="maximum number of sampled features used to fit each class GMM")
+    parser.add_argument("--gmm_pseudo_threshold",type=float,default=0.7,help="minimum old-model confidence for accepting an old-class pseudo label")
+    parser.add_argument("--gmm_em_iters",type=int,default=30,help="maximum number of EM iterations to fit a GMM")
 
     # Performance Options
     parser.add_argument("--init_portion", type=float, default=0.2) 
