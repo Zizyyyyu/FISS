@@ -455,6 +455,8 @@ class GaussianMixture(torch.nn.Module):
         """
         if len(x.size()) == 3:
             x = x.squeeze(1)
+        if int(n_centers)==1:
+            return x.mean(dim=0,keepdim=True).unsqueeze(0)
         x_min, x_max = x.min(), x.max()
         x = (x - x_min) / (x_max - x_min)
 
