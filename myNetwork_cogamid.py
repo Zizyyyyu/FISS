@@ -48,9 +48,12 @@ class CoGaMiDNetwork(nn.Module):
         for classifier in self.network.cls:
             if self.network.use_cosine:
                 weight=F.normalize(classifier.weight,dim=1,p=2)
-                outputs.append(F.conv2d(feature_map,weight))
             else:
-                outputs.append(classifier(feature_map))
+                weight=classifier.weight
+            class_logits=torch.einsum('bchw,oc->bohw',feature_map,weight[:,:,0,0])
+            if classifier.bias is not None:
+                class_logits=class_logits+classifier.bias.view(1,-1,1,1)
+            outputs.append(class_logits)
         foreground_logits=torch.cat(outputs,dim=1)
         background_logits=torch.zeros_like(foreground_logits[:,:1])
         return torch.cat([background_logits,foreground_logits],dim=1)

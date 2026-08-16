@@ -15,8 +15,7 @@ def classify_cogamid_features(model,feature_map):
     network=unwrap_cogamid_model(model)
     if hasattr(network,'classify_features'):
         classifier_dtype=next(network.cls.parameters()).dtype
-        with amp.disable_casts():
-            return network.classify_features(feature_map.to(dtype=classifier_dtype))
+        return network.classify_features(feature_map.to(dtype=classifier_dtype))
     outputs=[]
     for index,classifier in enumerate(network.cls):
         if index==0 and network.multi_modal_background:
