@@ -1,5 +1,5 @@
 import argparse
-from asyncio import FastChildWatcher
+import os
 import tasks
 
 import json
@@ -122,7 +122,7 @@ def args_parser():
     parser.add_argument('--proto_temperature', type=float, default=1.0)
 
 
-    parser.add_argument("--local_rank", type=int, default=0)
+    parser.add_argument("--local_rank","--local-rank",dest="local_rank",type=int,default=int(os.environ.get("LOCAL_RANK",0)))
     parser.add_argument("--num_workers", type=int, default=1, help='number of workers (default: 1)')
 
 

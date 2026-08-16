@@ -1,4 +1,3 @@
-from tkinter import N
 import torch.nn as nn
 import torch
 import copy

@@ -1,7 +1,3 @@
-from re import S
-from selectors import EpollSelector
-from signal import signal
-from tkinter import N
 import torch.nn as nn
 import torch
 from myNetwork import *

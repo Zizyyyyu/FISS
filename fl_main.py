@@ -1,5 +1,3 @@
-from tkinter import N
-from turtle import pd
 import copy
 from FC import FC_model
 from FC_cogamid import FC_model_CoGaMiD
@@ -81,7 +79,9 @@ def get_testset(opts, step):
 def main(args):
 
     distributed.init_process_group(backend='nccl', init_method='env://')
-    device_id, device = args.local_rank, torch.device(args.local_rank)
+    device_id=int(os.environ.get('LOCAL_RANK',args.local_rank))
+    args.local_rank=device_id
+    device=torch.device('cuda',device_id)
     rank, world_size = distributed.get_rank(), distributed.get_world_size()
     torch.cuda.set_device(device_id)
 
