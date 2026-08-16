@@ -43,14 +43,12 @@ def get_gmm_prototypes(old_gmms):
     return torch.stack(prototypes,dim=0)
 
 
-def sample_old_gmm_features(old_gmms,feature_counts,num_batches,max_per_class,noise_scale):
+def sample_old_gmm_features(old_gmms,sample_counts,noise_scale):
     sampled_features=[]
-    num_batches=max(1,int(num_batches))
-    max_per_class=max(1,int(max_per_class))
     for class_id in sorted(old_gmms):
-        feature_count=max(1,int(feature_counts[class_id]))
-        sample_count=max(1,feature_count//num_batches)
-        sample_count=min(sample_count,max_per_class)
+        sample_count=int(sample_counts.get(class_id,0))
+        if sample_count<=0:
+            continue
         class_features=old_gmms[class_id].sample(sample_count)[0]
         if float(noise_scale)>0:
             class_features=class_features+torch.randn_like(class_features)*float(noise_scale)

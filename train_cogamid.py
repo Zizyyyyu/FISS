@@ -29,7 +29,7 @@ def classify_cogamid_features(model,feature_map):
 
 
 class Trainer_CoGaMiD:
-    def __init__(self,model,model_old,device,rank,opts,classes,step,gmm_pool):
+    def __init__(self,model,model_old,device,rank,opts,classes,step,gmm_pool,trainer_state=None):
         self.model=model
         self.model_old=model_old
         self.device=device
@@ -54,24 +54,97 @@ class Trainer_CoGaMiD:
         self.old_gmms={}
         self.old_feature_counts={}
         self.old_prototypes=None
+        self.predicted_old_counts={}
+        self.replay_counts={}
+        self.extra_bg_ratio=0.0
+        self.statistics_ready=False
         if self.step>0:
             self.old_gmms,self.old_feature_counts=restore_old_gmm_pool(gmm_pool,self.old_classes,device)
             self.old_prototypes=get_gmm_prototypes(self.old_gmms)
             if self.rank==0 and len(self.old_gmms)<self.old_classes-1:
                 print(f'CoGaMiD GMM pool contains {len(self.old_gmms)}/{self.old_classes-1} old classes')
+            if trainer_state is not None and int(trainer_state.get('step',-1))==self.step:
+                self.predicted_old_counts={int(class_id):int(feature_count) for class_id,feature_count in trainer_state.get('predicted_old_counts',{}).items()}
+                self.replay_counts={int(class_id):int(feature_count) for class_id,feature_count in trainer_state.get('replay_counts',{}).items()}
+                self.extra_bg_ratio=float(trainer_state.get('extra_bg_ratio',0.0))
+                self.statistics_ready=bool(trainer_state.get('statistics_ready',False))
 
     def before(self,cur_epoch,train_loader):
+        if self.step>0 and not self.statistics_ready:
+            self._compute_client_statistics(train_loader)
         return None
 
     def state_dict(self):
-        return {}
+        return {
+            'step':self.step,
+            'predicted_old_counts':self.predicted_old_counts.copy(),
+            'replay_counts':self.replay_counts.copy(),
+            'extra_bg_ratio':self.extra_bg_ratio,
+            'statistics_ready':self.statistics_ready
+        }
 
-    def _make_fake_features(self,num_batches):
+    def _compute_client_statistics(self,train_loader):
+        if self.model_old is None:
+            raise ValueError('CoGaMiD requires the frozen old model to compute client statistics')
+        statistics=torch.zeros(self.nb_current_classes+1,dtype=torch.float64,device=self.device)
+        self.model_old.eval()
+        unwrap_cogamid_model(self.model_old).in_eval=False
+        with torch.no_grad():
+            for images,labels in train_loader:
+                images=images.to(self.device,dtype=torch.float32,non_blocking=True)
+                labels=labels.to(self.device,dtype=torch.long,non_blocking=True)
+                old_logits,old_intermediate=self.model_old(images,ret_intermediate=True)
+                old_features=old_intermediate['pre_logits']
+                labels_small=F.interpolate(labels.unsqueeze(1).float(),size=old_features.shape[-2:],mode='nearest').squeeze(1).long()
+                old_logits_small=F.interpolate(old_logits.detach().float(),size=old_features.shape[-2:],mode='bilinear',align_corners=False)
+                old_probabilities=torch.softmax(old_logits_small,dim=1)
+                old_confidences,old_predictions=old_probabilities.max(dim=1)
+                eligible_old_region=labels_small<self.old_classes
+                statistics[0]+=((labels_small==0)&(old_predictions==0)).sum()
+                for class_id in self.old_gmms:
+                    class_mask=eligible_old_region&(old_predictions==class_id)&(old_confidences>=float(self.opts.gmm_pseudo_threshold))
+                    statistics[class_id]+=class_mask.sum()
+                new_region=(labels_small>=self.new_class_start)&(labels_small<self.nb_current_classes)
+                statistics[-1]+=new_region.sum()
+        distributed.all_reduce(statistics)
+        num_batches=max(1,len(train_loader)*distributed.get_world_size())
+        self.predicted_old_counts={class_id:int(statistics[class_id].item()) for class_id in sorted(self.old_gmms)}
+        self.replay_counts={}
+        for class_id in sorted(self.old_gmms):
+            previous_count=max(1,int(self.old_feature_counts[class_id]))
+            if self.opts.overlap:
+                sample_count=max(1,(previous_count-self.predicted_old_counts[class_id])//num_batches)
+            else:
+                sample_count=max(1,previous_count//num_batches)
+            self.replay_counts[class_id]=min(sample_count,int(self.opts.cogamid_replay_max_per_class))
+        predicted_background=float(statistics[0].item())
+        predicted_old_total=float(sum(self.predicted_old_counts.values()))
+        new_feature_total=float(statistics[-1].item())
+        previous_background=predicted_background+predicted_old_total
+        if self.opts.overlap:
+            previous_background=previous_background*(1.0-0.01*self.new_class_count)
+            coverage_ratios=[]
+            for class_id in sorted(self.old_gmms):
+                previous_count=max(1,int(self.old_feature_counts[class_id]))
+                coverage_ratios.append(self.predicted_old_counts[class_id]/previous_count)
+            max_coverage=max(coverage_ratios) if len(coverage_ratios)>0 else 0.0
+            if max_coverage<1.0:
+                extra_background_target=previous_background-max_coverage*new_feature_total
+            else:
+                extra_background_target=previous_background-new_feature_total
+        else:
+            extra_background_target=previous_background
+        self.extra_bg_ratio=max(0.0,extra_background_target/max(1.0,predicted_background))
+        self.statistics_ready=True
+        if self.rank==0:
+            print(f'CoGaMiD old-class counts on this client: {self.predicted_old_counts}')
+            print(f'CoGaMiD GMM replay counts per batch: {self.replay_counts}')
+            print(f'CoGaMiD extra background ratio: {self.extra_bg_ratio}')
+
+    def _make_fake_features(self):
         return sample_old_gmm_features(
             old_gmms=self.old_gmms,
-            feature_counts=self.old_feature_counts,
-            num_batches=num_batches,
-            max_per_class=self.opts.cogamid_replay_max_per_class,
+            sample_counts=self.replay_counts,
             noise_scale=self.opts.cogamid_feature_noise
         )
 
@@ -128,7 +201,7 @@ class Trainer_CoGaMiD:
                 old_score=old_logits[:,1:].detach().max(dim=1).values
                 negative_mask=((labels==0)&(old_score>current_new_score)).unsqueeze(1)
                 pseudo_region=pseudo_region&negative_mask
-                fake_features=self._make_fake_features(len(train_loader))
+                fake_features=self._make_fake_features()
                 fake_weight=0.0
                 fake_loss=features.sum()*0.0
                 if fake_features is not None:
@@ -143,7 +216,7 @@ class Trainer_CoGaMiD:
                     extra_background_logits=classify_cogamid_features(self.model,extra_background_features)
                     extra_background_labels=torch.zeros((1,extra_background_logits.shape[2],extra_background_logits.shape[3]),dtype=torch.long,device=self.device)
                     extra_background_loss=self.mbce_loss(extra_background_logits[:,self.new_class_start:self.new_class_start+self.new_class_count],extra_background_labels)
-                    extra_background_weight=float(extra_background_logits.shape[2]*extra_background_logits.shape[3])/(features.shape[0]*features.shape[2]*features.shape[3])
+                    extra_background_weight=self.extra_bg_ratio*float(extra_background_logits.shape[2]*extra_background_logits.shape[3])/(features.shape[0]*features.shape[2]*features.shape[3])
                 loss_mbce=(loss_mbce+fake_loss*fake_weight+extra_background_loss*extra_background_weight)/(1.0+fake_weight+extra_background_weight)
                 loss_pkd=self.pkd_loss(features,old_features,pseudo_region,self.old_gmms)
                 loss_cont=self.contrast_loss(features,labels,self.old_prototypes)

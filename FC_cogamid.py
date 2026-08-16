@@ -23,6 +23,11 @@ class FC_model_CoGaMiD(FC_model):
     def set_gmm_pool(self,gmm_pool):
         self.gmm_pool=copy.deepcopy(gmm_pool)
 
+    def beforeTrain(self,args,current_step):
+        if int(current_step)!=self.learned_step:
+            self.trainer_state=None
+        super().beforeTrain(args,current_step)
+
     def train(self,args,model_g,ep_g):
         model=copy.deepcopy(model_g)
         if self.signal:
@@ -108,7 +113,8 @@ class FC_model_CoGaMiD(FC_model):
             opts=args,
             classes=tasks.get_per_task_classes(args.dataset,args.task,self.learned_step),
             step=self.learned_step,
-            gmm_pool=self.gmm_pool
+            gmm_pool=self.gmm_pool,
+            trainer_state=self.trainer_state
         )
         for cur_epoch in range(args.epochs_local):
             trainer.before(cur_epoch=self.cur_epoch,train_loader=train_loader)
