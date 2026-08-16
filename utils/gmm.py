@@ -166,7 +166,7 @@ class GaussianMixture(torch.nn.Module):
                 for p in self.parameters():
                     p.data = p.data.to(device)
                 if self.init_params == "kmeans":
-                    self.mu.data, = self.get_kmeans_mu(x, n_centers=self.n_components)
+                    self.mu.data = self.get_kmeans_mu(x, n_centers=self.n_components)
 
             i += 1
             j = self.log_likelihood - log_likelihood_old
