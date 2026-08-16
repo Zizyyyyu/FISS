@@ -166,7 +166,7 @@ class GaussianMixture(torch.nn.Module):
                 for p in self.parameters():
                     p.data = p.data.to(device)
                 if self.init_params == "kmeans":
-                    self.mu.data = self.get_kmeans_mu(x, n_centers=self.n_components)
+                    self.mu.data=self.get_kmeans_mu(x,n_centers=self.n_components)
 
             i += 1
             j = self.log_likelihood - log_likelihood_old
@@ -218,7 +218,7 @@ class GaussianMixture(torch.nn.Module):
             x:          torch.Tensor (n, d)
             y:          torch.Tensor (n)
         """
-        counts = torch.distributions.multinomial.Multinomial(total_count=n, probs=self.pi.reshape(-1)).sample().reshape(-1)
+        counts=torch.distributions.multinomial.Multinomial(total_count=n,probs=self.pi.reshape(-1)).sample().reshape(-1)
 
         x = torch.empty(0, device=counts.device)
         y = torch.cat([torch.full([int(sample)], j, device=counts.device) for j, sample in enumerate(counts)])
