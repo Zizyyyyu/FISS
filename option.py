@@ -62,6 +62,12 @@ def modify_command_options(opts):
             opts.classif_adaptive_factor = True
             opts.out_dis = True
 
+        if opts.incremental_method == 'CoGaMiD':
+            if opts.cogamid_pos_weight is None:
+                opts.cogamid_pos_weight = 4.0 if opts.dataset=='voc' else 30.0
+            if opts.name=='OURS':
+                opts.name='CoGaMiD'
+
     
     opts.no_overlap = not opts.overlap
     opts.no_cross_val = not opts.cross_val
@@ -75,7 +81,7 @@ def args_parser():
     parser.add_argument("--data_root", type=str, default='./data/PascalVOC12', help="path to Dataset")
     parser.add_argument('--dataset', type=str, default='voc', choices=['voc', 'ade'], help="name of dataset")
     parser.add_argument("--task", type=str, default="4-4", choices=tasks.get_task_list(), help="Task to be executed (default: 4-4)")
-    parser.add_argument('--incremental_method', type=str, default='OURS', choices=['FT', 'LWF', 'ILT', 'MiB', 'PLOP', 'RCIL', 'OURS'], help="name of method")
+    parser.add_argument('--incremental_method', type=str, default='OURS', choices=['FT', 'LWF', 'ILT', 'MiB', 'PLOP', 'RCIL', 'OURS', 'CoGaMiD'], help="name of method")
     parser.add_argument("--name",type=str,default='OURS',help="name of the experiment - to append to log directory (default: Experiment)")
     parser.add_argument('--class_ratio', type=float, default=0.5, help='ratio of classes (>1) for local clients') 
     parser.add_argument('--sample_ratio2', type=float, default=0.8, help='ratio of data for local clients (class>1)')
@@ -97,6 +103,16 @@ def args_parser():
     parser.add_argument("--gmm_max_features",type=int,default=20000,help="maximum number of sampled features used to fit each class GMM")
     parser.add_argument("--gmm_pseudo_threshold",type=float,default=0.7,help="minimum old-model confidence for accepting an old-class pseudo label")
     parser.add_argument("--gmm_em_iters",type=int,default=30,help="maximum number of EM iterations to fit a GMM")
+    parser.add_argument("--cogamid_mbce",type=float,default=1.0,help="weight of CoGaMiD weighted BCE loss")
+    parser.add_argument("--cogamid_pkd",type=float,default=5.0,help="weight of CoGaMiD probabilistic knowledge distillation loss")
+    parser.add_argument("--cogamid_cont",type=float,default=0.05,help="weight of CoGaMiD contrast loss")
+    parser.add_argument("--cogamid_uncer",type=float,default=0.1,help="weight of CoGaMiD uncertainty loss")
+    parser.add_argument("--cogamid_pos_weight",type=float,default=None,help="positive weight for CoGaMiD weighted BCE")
+    parser.add_argument("--cogamid_replay_max_per_class",type=int,default=512,help="maximum sampled GMM features per old class in one batch")
+    parser.add_argument("--cogamid_feature_noise",type=float,default=1.0,help="standard deviation multiplier of sampled feature noise")
+    parser.add_argument("--cogamid_head_lr_mult",type=float,default=10.0,help="CoGaMiD learning-rate multiplier for the segmentation head")
+    parser.add_argument("--cogamid_old_classifier_lr_mult",type=float,default=10.0,help="CoGaMiD learning-rate multiplier for old classifiers")
+    parser.add_argument("--cogamid_new_classifier_lr_mult",type=float,default=100.0,help="CoGaMiD learning-rate multiplier for the new classifier")
 
     # Performance Options
     parser.add_argument("--init_portion", type=float, default=0.2) 

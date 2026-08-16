@@ -201,11 +201,11 @@ def collect_client_class_features(current_model,old_model,data_loader,device,old
                 batch_cls_data=batch_cls_data,
                 max_features=max_features
             )
+        return class_accumulator
     finally:
         current_model.train(current_model_was_training)
         if old_model is not None:
             old_model.train(old_model_was_training)
-    return class_accumulator
 
 def fit_class_gmms(class_accumulator,n_components,min_features,em_iters,device):
     n_components=int(n_components)

@@ -2,12 +2,15 @@ from tkinter import N
 from turtle import pd
 import copy
 from FC import FC_model
+from FC_cogamid import FC_model_CoGaMiD
+from federated_gmm import update_global_gmm_pool
 import torch
 import random
 import os.path as osp
 import os
-
+import numpy as np
 from myNetwork import make_model
+from myNetwork_cogamid import make_model_cogamid
 from myNetwork_rcil import make_model_rcil
 
 from Fed_utils import * 
@@ -83,10 +86,13 @@ def main(args):
     torch.cuda.set_device(device_id)
 
     setup_seed(args.seed) 
+    use_cogamid=args.incremental_method=='CoGaMiD'
 
     args.inital_nb_classes = tasks.get_per_task_classes(args.dataset,args.task,step=0)[0] 
 
-    if args.name != 'RCIL':
+    if use_cogamid:
+        model_g=make_model_cogamid(args,classes=tasks.get_per_task_classes(args.dataset,args.task,step=0))
+    elif args.name != 'RCIL':
         model_g = make_model(args, classes=tasks.get_per_task_classes(args.dataset, args.task, step=0)) 
     else:
         model_g = make_model_rcil(args, classes=tasks.get_per_task_classes(args.dataset, args.task, step=0)) 
@@ -98,7 +104,10 @@ def main(args):
     num_clients = args.num_clients 
     models = []
     for client_index in range(40): 
-        model_temp = FC_model(client_index, args.batch_size, args.num_workers, args.loss_de, args.pod, world_size, rank, device, args.entropy_threshold)
+        if use_cogamid:
+            model_temp=FC_model_CoGaMiD(client_index,args.batch_size,args.num_workers,args.loss_de,args.pod,world_size,rank,device,args.entropy_threshold)
+        else:
+            model_temp=FC_model(client_index,args.batch_size,args.num_workers,args.loss_de,args.pod,world_size,rank,device,args.entropy_threshold)
         models.append(model_temp)
 
     old_global_model=None
@@ -123,17 +132,22 @@ def main(args):
 
 
         if current_step != old_step and old_step != -1:
-            old_global_model=copy.deepcopy(model_g)
-            old_global_model.eval()
-            for param in old_global_model.parameters():
-                param.requires_grad=False
+            if use_cogamid:
+                old_global_model=copy.deepcopy(model_g)
+                old_global_model.eval()
+                for param in old_global_model.parameters():
+                    param.requires_grad=False
             args.base_weights = False
     
             for i in range(num_clients):
                 models[i].last_entropy = -1
             num_clients = num_clients + args.add_clients
 
-            if args.name != 'RCIL':
+            if use_cogamid:
+                model_g1=make_model_cogamid(args,classes=tasks.get_per_task_classes(args.dataset,args.task,current_step))
+                model_g1.load_state_dict(model_g.state_dict(),strict=False)
+                model_g=model_g1
+            elif args.name != 'RCIL':
                 model_g1 = make_model(args, classes=tasks.get_per_task_classes(args.dataset, args.task, current_step)) 
                 model_g1.load_state_dict(model_g.state_dict(), strict=False)  
                 if args.init_balanced:
@@ -192,9 +206,47 @@ def main(args):
                 w_g_new = torch.load(base_ckpt_path)
                 model_g.load_state_dict(w_g_new) 
                 val_score = model_global_eval(args, model_g, test_loader, current_step, val_metrics, device, rank)
+        if use_cogamid and is_task_final_round:
+            gmm_pool_path=f"{args.checkpoint}/{args.dataset}_{args.task}_{args.name}_gmm_pool_step_{current_step}.pth"
+            distributed.barrier()
+            if rank==0:
+                print(f'building client GMM uploads for step {current_step}')
+                python_rng_state=random.getstate()
+                numpy_rng_state=np.random.get_state()
+                torch_rng_state=torch.get_rng_state()
+                cuda_rng_state=torch.cuda.get_rng_state(device)
+                client_uploads=[]
+                try:
+                    for client_id in range(num_clients):
+                        client_upload=models[client_id].build_gmm_upload(
+                            args=args,
+                            current_global_model=model_g,
+                            old_global_model=old_global_model,
+                            current_step=current_step
+                        )
+                        client_uploads.append(client_upload)
+                        print(f'client {client_id} GMM upload finished')
 
-
-
+                    global_gmm_pool,gmm_winners=update_global_gmm_pool(
+                        global_gmm_pool=global_gmm_pool,
+                        client_uploads=client_uploads,
+                        current_step=current_step
+                    )
+                    torch.save(global_gmm_pool,gmm_pool_path)
+                    print(f'global GMM pool updated with {len(gmm_winners)} class winners')
+                    print(f'global GMM pool saved to {gmm_pool_path}')
+                    del client_uploads
+                    del gmm_winners
+                finally:
+                    random.setstate(python_rng_state)
+                    np.random.set_state(numpy_rng_state)
+                    torch.set_rng_state(torch_rng_state)
+                    torch.cuda.set_rng_state(cuda_rng_state,device)
+            distributed.barrier()
+            if rank!=0:
+                global_gmm_pool=torch.load(gmm_pool_path,map_location='cpu')
+            for client_model in models:
+                client_model.set_gmm_pool(global_gmm_pool)
         if rank == 0:
             if ((ep_g+1)% args.steps_global)==0:
                 with open(f"{args.results_path}/{args.date}_{args.dataset}_{args.task}_{args.name}.csv", "a+") as f:
@@ -208,6 +260,8 @@ def main(args):
                 if current_step==0 and args.name != "RCIL" and args.base_weights == False:
                     torch.save(model_g.state_dict(),  f"{args.checkpoint}/{args.dataset}_{args.task}_base_step_{current_step}.pth")
 
+        if use_cogamid and is_task_final_round:
+            distributed.barrier()
         old_step = current_step
 
 
