@@ -218,7 +218,7 @@ class GaussianMixture(torch.nn.Module):
             x:          torch.Tensor (n, d)
             y:          torch.Tensor (n)
         """
-        counts = torch.distributions.multinomial.Multinomial(total_count=n, probs=self.pi.squeeze()).sample()
+        counts = torch.distributions.multinomial.Multinomial(total_count=n, probs=self.pi.reshape(-1)).sample()
 
         x = torch.empty(0, device=counts.device)
         y = torch.cat([torch.full([int(sample)], j, device=counts.device) for j, sample in enumerate(counts)])
