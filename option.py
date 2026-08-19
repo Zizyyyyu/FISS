@@ -101,6 +101,7 @@ def args_parser():
     parser.add_argument("--gmm_components",type=int,default=3,help="number of Gaussian components for each class")
     parser.add_argument("--gmm_min_features",type=int,default=30,help="minimum number of features required to fit a class GMM")
     parser.add_argument("--gmm_max_features",type=int,default=20000,help="maximum number of sampled features used to fit each class GMM")
+    parser.add_argument("--gmm_batch_size",type=int,default=None,help="batch size used only for client GMM feature extraction")
     parser.add_argument("--gmm_pseudo_threshold",type=float,default=0.7,help="minimum old-model confidence for accepting an old-class pseudo label")
     parser.add_argument("--gmm_em_iters",type=int,default=30,help="maximum number of EM iterations to fit a GMM")
     parser.add_argument("--cogamid_mbce",type=float,default=1.0,help="weight of CoGaMiD weighted BCE loss")

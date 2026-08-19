@@ -165,9 +165,12 @@ class FC_model_CoGaMiD(FC_model):
         per_task_classes=tasks.get_per_task_classes(args.dataset,args.task,current_step)
         old_classes=sum(per_task_classes[:-1])
         nb_current_classes=sum(per_task_classes)
+        gmm_batch_size=self.batch_size if args.gmm_batch_size is None else int(args.gmm_batch_size)
+        if gmm_batch_size<=0:
+            raise ValueError('gmm_batch_size must be greater than 0')
         gmm_loader=data.DataLoader(
             self.current_trainset,
-            batch_size=self.batch_size,
+            batch_size=gmm_batch_size,
             shuffle=False,
             num_workers=self.num_workers,
             drop_last=False
