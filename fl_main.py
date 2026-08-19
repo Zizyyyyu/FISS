@@ -1,4 +1,5 @@
 import copy
+from datetime import timedelta
 from FC import FC_model
 from FC_cogamid import FC_model_CoGaMiD
 from federated_gmm import update_global_gmm_pool
@@ -78,7 +79,9 @@ def get_testset(opts, step):
 
 def main(args):
 
-    distributed.init_process_group(backend='nccl', init_method='env://')
+    if float(args.distributed_timeout_hours)<=0:
+        raise ValueError('distributed_timeout_hours must be greater than 0')
+    distributed.init_process_group(backend='nccl',init_method='env://',timeout=timedelta(hours=float(args.distributed_timeout_hours)))
     device_id=int(os.environ.get('LOCAL_RANK',args.local_rank))
     args.local_rank=device_id
     device=torch.device('cuda',device_id)
@@ -87,11 +90,18 @@ def main(args):
 
     setup_seed(args.seed) 
     use_cogamid=args.incremental_method=='CoGaMiD'
+    resume_step=int(args.resume_step)
+    if resume_step<0:
+        raise ValueError('resume_step cannot be negative')
+    if resume_step>0 and not use_cogamid:
+        raise ValueError('resume_step is currently supported only for CoGaMiD')
+    previous_step=resume_step-1
+    initial_model_step=previous_step if resume_step>0 else 0
 
     args.inital_nb_classes = tasks.get_per_task_classes(args.dataset,args.task,step=0)[0] 
 
     if use_cogamid:
-        model_g=make_model_cogamid(args,classes=tasks.get_per_task_classes(args.dataset,args.task,step=0))
+        model_g=make_model_cogamid(args,classes=tasks.get_per_task_classes(args.dataset,args.task,step=initial_model_step))
     elif args.name != 'RCIL':
         model_g = make_model(args, classes=tasks.get_per_task_classes(args.dataset, args.task, step=0)) 
     else:
@@ -101,7 +111,7 @@ def main(args):
         model_g.fix_bn()
 
 
-    num_clients = args.num_clients 
+    num_clients=args.num_clients
     models = []
     for client_index in range(40): 
         if use_cogamid:
@@ -113,9 +123,30 @@ def main(args):
     old_global_model=None
     global_gmm_pool={}
 
-    old_step = -1
+    old_step=-1
+    start_global_epoch=0
+    if resume_step>0:
+        model_resume_path=f'{args.checkpoint}/{args.dataset}_{args.task}_{args.name}_step_{previous_step}.pth'
+        gmm_resume_path=f'{args.checkpoint}/{args.dataset}_{args.task}_{args.name}_gmm_pool_step_{previous_step}.pth'
+        if not os.path.exists(model_resume_path):
+            raise FileNotFoundError(f'resume model checkpoint does not exist: {model_resume_path}')
+        if not os.path.exists(gmm_resume_path):
+            raise FileNotFoundError(f'resume GMM pool does not exist: {gmm_resume_path}')
+        model_g.load_state_dict(torch.load(model_resume_path,map_location='cpu'),strict=True)
+        global_gmm_pool=torch.load(gmm_resume_path,map_location='cpu')
+        for client_model in models:
+            client_model.set_gmm_pool(global_gmm_pool)
+        num_clients=args.num_clients+args.add_clients*max(0,resume_step-1)
+        if num_clients+args.add_clients>len(models):
+            raise ValueError('resume_step requires more clients than the configured client model capacity')
+        old_step=previous_step
+        start_global_epoch=resume_step*args.steps_global
+        if rank==0:
+            print(f'resume CoGaMiD from step {resume_step}, global round {start_global_epoch}')
+            print(f'loaded model checkpoint from {model_resume_path}')
+            print(f'loaded GMM pool from {gmm_resume_path}')
 
-    for ep_g in range(args.epochs_global): 
+    for ep_g in range(start_global_epoch,args.epochs_global):
 
         current_step = ep_g // args.steps_global
         is_task_final_round=((ep_g+1)%args.steps_global==0)
@@ -206,6 +237,17 @@ def main(args):
                 w_g_new = torch.load(base_ckpt_path)
                 model_g.load_state_dict(w_g_new) 
                 val_score = model_global_eval(args, model_g, test_loader, current_step, val_metrics, device, rank)
+        if rank==0 and is_task_final_round:
+            with open(f"{args.results_path}/{args.date}_{args.dataset}_{args.task}_{args.name}.csv","a+") as f:
+                classes_iou=','.join(
+                    [str(val_score['Class IoU'].get(c,'x')) for c in range(args.num_classes)]
+                )
+                f.write(f"{current_step},{classes_iou},{val_score['Mean IoU']}\n")
+            step_checkpoint_path=f"{args.checkpoint}/{args.dataset}_{args.task}_{args.name}_step_{current_step}.pth"
+            torch.save(model_g.state_dict(),step_checkpoint_path)
+            print(f'global model saved to {step_checkpoint_path} before GMM construction')
+            if current_step==0 and args.name!="RCIL" and args.base_weights==False:
+                torch.save(model_g.state_dict(),f"{args.checkpoint}/{args.dataset}_{args.task}_base_step_{current_step}.pth")
         if use_cogamid and is_task_final_round:
             gmm_pool_path=f"{args.checkpoint}/{args.dataset}_{args.task}_{args.name}_gmm_pool_step_{current_step}.pth"
             distributed.barrier()
@@ -247,19 +289,6 @@ def main(args):
                 global_gmm_pool=torch.load(gmm_pool_path,map_location='cpu')
             for client_model in models:
                 client_model.set_gmm_pool(global_gmm_pool)
-        if rank == 0:
-            if ((ep_g+1)% args.steps_global)==0:
-                with open(f"{args.results_path}/{args.date}_{args.dataset}_{args.task}_{args.name}.csv", "a+") as f:
-                    classes_iou = ','.join(
-                        [str(val_score['Class IoU'].get(c, 'x')) for c in range(args.num_classes)]
-                    )
-                    f.write(f"{current_step},{classes_iou},{val_score['Mean IoU']}\n")
-                
-                torch.save(model_g.state_dict(),  f"{args.checkpoint}/{args.dataset}_{args.task}_{args.name}_step_{current_step}.pth")
-
-                if current_step==0 and args.name != "RCIL" and args.base_weights == False:
-                    torch.save(model_g.state_dict(),  f"{args.checkpoint}/{args.dataset}_{args.task}_base_step_{current_step}.pth")
-
         if use_cogamid and is_task_final_round:
             distributed.barrier()
         old_step = current_step

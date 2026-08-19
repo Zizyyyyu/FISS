@@ -95,6 +95,8 @@ def args_parser():
     parser.add_argument('--local_clients', type=int, default=4, help='the number of selected clients in each round')  
     parser.add_argument('--epochs_global', type=int, default=25, help='total number of global rounds') 
     parser.add_argument('--steps_global', type=int, default=5, help='the global rounds for each step (task)') 
+    parser.add_argument("--resume_step",type=int,default=0,help="first task step to train when resuming CoGaMiD")
+    parser.add_argument("--distributed_timeout_hours",type=float,default=6.0,help="distributed collective timeout in hours")
     parser.add_argument("--seed", type=int, default=2023, help="random seed (default: 2023)")
     parser.add_argument("--use_entropy_detection", action="store_true", default=False)
     parser.add_argument("--entropy_threshold", type=float, default=0.6, help="threshold for entropy detection")
