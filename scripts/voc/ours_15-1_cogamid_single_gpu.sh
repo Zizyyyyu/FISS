@@ -13,7 +13,7 @@ NB_GPU=1
 DATA_ROOT='./data/PascalVOC12'
 DATASET=voc
 TASK=15-1
-NAME=CoGaMiD
+NAME=CoGaMiD_single48_bs24
 INCREMENTAL_METHOD=CoGaMiD
 STEPS_GLOBAL=5
 TASK_NUM=6
@@ -21,12 +21,13 @@ EPOCHS_GLOBAL=`expr ${STEPS_GLOBAL} \* ${TASK_NUM}`
 
 CLASS_RATIO=0.5
 SAMPLE_RATIO2=0.6
-BATCH_SIZE=8
+BATCH_SIZE=24
 EPOCHS_LOCAL=6
 
 GMM_COMPONENTS=3
 GMM_MIN_FEATURES=30
 GMM_MAX_FEATURES=20000
+GMM_BATCH_SIZE=6
 GMM_PSEUDO_THRESHOLD=0.7
 GMM_EM_ITERS=30
 
@@ -44,13 +45,12 @@ echo ${EPOCHS_GLOBAL}
 SCREENNAME="${DATASET}_${TASK}_${NAME} On GPUs ${GPU}"
 
 RESULTSFILE=results/seed_${SEED}-ov/${START_DATE}_${DATASET}_${TASK}_${NAME}.csv
-rm -f ${RESULTSFILE}
 
 echo -ne "\ek${SCREENNAME}\e\\"
 
 echo "Writing in ${RESULTSFILE}"
 
-CUDA_VISIBLE_DEVICES=${GPU} python3 -m torch.distributed.run --master_port ${PORT} --nproc_per_node=${NB_GPU} fl_main.py --date ${START_DATE} --data_root ${DATA_ROOT} --overlap --dataset ${DATASET} --name ${NAME} --task ${TASK} --incremental_method ${INCREMENTAL_METHOD} --class_ratio ${CLASS_RATIO} --sample_ratio2 ${SAMPLE_RATIO2} --batch_size ${BATCH_SIZE} --epochs_local ${EPOCHS_LOCAL} --steps_global ${STEPS_GLOBAL} --epochs_global ${EPOCHS_GLOBAL} --seed ${SEED} --gmm_components ${GMM_COMPONENTS} --gmm_min_features ${GMM_MIN_FEATURES} --gmm_max_features ${GMM_MAX_FEATURES} --gmm_pseudo_threshold ${GMM_PSEUDO_THRESHOLD} --gmm_em_iters ${GMM_EM_ITERS} --cogamid_mbce ${COGAMID_MBCE} --cogamid_pkd ${COGAMID_PKD} --cogamid_cont ${COGAMID_CONT} --cogamid_uncer ${COGAMID_UNCER} --cogamid_pos_weight ${COGAMID_POS_WEIGHT} --cogamid_replay_max_per_class ${COGAMID_REPLAY_MAX_PER_CLASS} --cogamid_feature_noise ${COGAMID_FEATURE_NOISE} --opt_level O1
+CUDA_VISIBLE_DEVICES=${GPU} python3 -m torch.distributed.run --master_port ${PORT} --nproc_per_node=${NB_GPU} fl_main.py --date ${START_DATE} --data_root ${DATA_ROOT} --overlap --dataset ${DATASET} --name ${NAME} --task ${TASK} --incremental_method ${INCREMENTAL_METHOD} --class_ratio ${CLASS_RATIO} --sample_ratio2 ${SAMPLE_RATIO2} --batch_size ${BATCH_SIZE} --epochs_local ${EPOCHS_LOCAL} --steps_global ${STEPS_GLOBAL} --epochs_global ${EPOCHS_GLOBAL} --seed ${SEED} --gmm_components ${GMM_COMPONENTS} --gmm_min_features ${GMM_MIN_FEATURES} --gmm_max_features ${GMM_MAX_FEATURES} --gmm_batch_size ${GMM_BATCH_SIZE} --gmm_pseudo_threshold ${GMM_PSEUDO_THRESHOLD} --gmm_em_iters ${GMM_EM_ITERS} --cogamid_mbce ${COGAMID_MBCE} --cogamid_pkd ${COGAMID_PKD} --cogamid_cont ${COGAMID_CONT} --cogamid_uncer ${COGAMID_UNCER} --cogamid_pos_weight ${COGAMID_POS_WEIGHT} --cogamid_replay_max_per_class ${COGAMID_REPLAY_MAX_PER_CLASS} --cogamid_feature_noise ${COGAMID_FEATURE_NOISE} --opt_level O1
 
 echo ${SCREENNAME}
 
