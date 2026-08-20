@@ -1,6 +1,7 @@
 import torch.nn as nn
 import torch
 import copy
+import gc
 from torchvision import transforms
 import numpy as np
 from torch.nn import functional as F
@@ -66,10 +67,10 @@ def model_global_eval(args, model_g, test_loader, current_step, val_metrics,devi
         print(val_metrics.to_str(val_score))
 
     tmp_model_g = tmp_model_g.to('cpu')
-    torch.cuda.empty_cache() 
-
-    del tmp_model_g
     del trainer
-   
+    del tmp_model_g
+    gc.collect()
+    torch.cuda.empty_cache()
+
     return val_score
 

@@ -1,4 +1,5 @@
 import copy
+import gc
 import os
 import torch
 from apex import amp
@@ -137,21 +138,25 @@ class FC_model_CoGaMiD(FC_model):
         else:
             self.last_learning_rate=optimizer.param_groups[0]['lr']
         model=model.to('cpu')
-        torch.cuda.empty_cache()
-        torch.distributed.barrier()
-        if args.use_entropy_detection==False:
-            self.signal=False
         local_model=model.module.state_dict()
-        del model
-        del params
-        del optimizer
-        del scheduler
-        del train_loader
-        del trainer
         if model_old is not None:
             model_old=model_old.to('cpu')
-            torch.cuda.empty_cache()
+        if args.use_entropy_detection==False:
+            self.signal=False
+        del trainer
+        del train_loader
+        del scheduler
+        del optimizer
+        del params
+        del model
+        if model_old is not None:
             del model_old
+        gc.collect()
+        torch.cuda.empty_cache()
+        allocated=torch.cuda.memory_allocated(self.device)/1024**3
+        reserved=torch.cuda.memory_reserved(self.device)/1024**3
+        print(f'CUDA memory rank {self.rank} after client {self.client_index} cleanup: allocated={allocated:.2f}GB, reserved={reserved:.2f}GB')
+        torch.distributed.barrier()
         return local_model
 
     def build_gmm_upload(self,args,current_global_model,old_global_model,current_step):
@@ -187,6 +192,7 @@ class FC_model_CoGaMiD(FC_model):
             old_model.eval()
             if hasattr(old_model,'in_eval'):
                 old_model.in_eval=True
+        class_accumulator=None
         try:
             class_accumulator=collect_client_class_features(
                 current_model=current_model,
@@ -211,5 +217,13 @@ class FC_model_CoGaMiD(FC_model):
             current_model.to('cpu')
             if old_model is not None:
                 old_model.to('cpu')
+            del class_accumulator
+            del gmm_loader
+            del old_model
+            del current_model
+            gc.collect()
             torch.cuda.empty_cache()
+            allocated=torch.cuda.memory_allocated(self.device)/1024**3
+            reserved=torch.cuda.memory_reserved(self.device)/1024**3
+            print(f'CUDA memory rank {self.rank} after client {self.client_index} GMM cleanup: allocated={allocated:.2f}GB, reserved={reserved:.2f}GB')
         return client_upload
