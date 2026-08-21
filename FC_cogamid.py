@@ -217,6 +217,10 @@ class FC_model_CoGaMiD(FC_model):
             current_model.to('cpu')
             if old_model is not None:
                 old_model.to('cpu')
+            apex_handle=getattr(getattr(amp,'_amp_state',None),'handle',None)
+            apex_cache_entries=len(apex_handle.cache) if apex_handle is not None and hasattr(apex_handle,'cache') else 0
+            if apex_handle is not None:
+                apex_handle._clear_cache()
             del class_accumulator
             del gmm_loader
             del old_model
@@ -225,5 +229,5 @@ class FC_model_CoGaMiD(FC_model):
             torch.cuda.empty_cache()
             allocated=torch.cuda.memory_allocated(self.device)/1024**3
             reserved=torch.cuda.memory_reserved(self.device)/1024**3
-            print(f'CUDA memory rank {self.rank} after client {self.client_index} GMM cleanup: allocated={allocated:.2f}GB, reserved={reserved:.2f}GB')
+            print(f'CUDA memory rank {self.rank} after client {self.client_index} GMM cleanup: allocated={allocated:.2f}GB, reserved={reserved:.2f}GB, apex_cache_entries={apex_cache_entries}')
         return client_upload
