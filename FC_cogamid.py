@@ -103,7 +103,6 @@ class FC_model_CoGaMiD(FC_model):
         if self.old_model is not None:
             model_old=copy.deepcopy(self.old_model)
             [model,model_old],optimizer=amp.initialize([model.to(self.device),model_old.to(self.device)],optimizer,opt_level=args.opt_level)
-            model_old=DistributedDataParallel(model_old)
             for parameter in model_old.parameters():
                 parameter.requires_grad=False
             model_old.eval()

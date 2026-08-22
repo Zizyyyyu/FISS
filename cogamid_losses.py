@@ -34,8 +34,6 @@ class CoGaMiDPKDLoss(nn.Module):
             raise ValueError('current and old feature maps must have the same shape')
         mask=F.interpolate(pseudo_region.float(),size=features.shape[-2:],mode='bilinear',align_corners=False)
         mask_sum=mask.sum()
-        if mask_sum.item()==0:
-            return features.sum()*0.0
         feature_loss=(features-features_old).pow(2)
         feature_loss=(feature_loss*mask).sum()/(mask_sum*features.shape[1]+1e-4)
         if len(old_gmms)==0:

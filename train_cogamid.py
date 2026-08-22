@@ -172,11 +172,12 @@ class Trainer_CoGaMiD:
         old_logits_small=F.interpolate(old_logits.detach(),size=features.shape[-2:],mode='bilinear',align_corners=False)
         old_prediction=old_logits_small.argmax(dim=1)
         region_background=(labels_small==0)&(old_prediction==0)
-        if not torch.any(region_background):
-            return None
         feature_grid=features.permute(0,2,3,1)
         selected_features=feature_grid[region_background]
-        return selected_features.transpose(0,1).unsqueeze(0).unsqueeze(3)
+        selected_count=int(selected_features.shape[0])
+        if selected_count==0:
+            selected_features=feature_grid[:1,:1,:1].reshape(1,features.shape[1])
+        return selected_features.transpose(0,1).unsqueeze(0).unsqueeze(3),selected_count
 
     def train(self,cur_epoch,optim,train_loader,scheduler=None,print_int=10):
         if len(train_loader)==0:
@@ -231,14 +232,11 @@ class Trainer_CoGaMiD:
                     fake_labels=torch.zeros((1,fake_logits.shape[2],fake_logits.shape[3]),dtype=torch.long,device=self.device)
                     fake_loss=self.mbce_loss(fake_logits[:,self.new_class_start:self.new_class_start+self.new_class_count],fake_labels)
                     fake_weight=float(fake_logits.shape[2]*fake_logits.shape[3])/(features.shape[0]*features.shape[2]*features.shape[3])
-                extra_background_features=self._make_extra_background_features(features,labels,old_logits)
-                extra_background_weight=0.0
-                extra_background_loss=features.sum()*0.0
-                if extra_background_features is not None:
-                    extra_background_logits=classify_cogamid_features(self.model,extra_background_features)
-                    extra_background_labels=torch.zeros((1,extra_background_logits.shape[2],extra_background_logits.shape[3]),dtype=torch.long,device=self.device)
-                    extra_background_loss=self.mbce_loss(extra_background_logits[:,self.new_class_start:self.new_class_start+self.new_class_count],extra_background_labels)
-                    extra_background_weight=self.extra_bg_ratio*float(extra_background_logits.shape[2]*extra_background_logits.shape[3])/(features.shape[0]*features.shape[2]*features.shape[3])
+                extra_background_features,extra_background_count=self._make_extra_background_features(features,labels,old_logits)
+                extra_background_logits=classify_cogamid_features(self.model,extra_background_features)
+                extra_background_labels=torch.zeros((1,extra_background_logits.shape[2],extra_background_logits.shape[3]),dtype=torch.long,device=self.device)
+                extra_background_loss=self.mbce_loss(extra_background_logits[:,self.new_class_start:self.new_class_start+self.new_class_count],extra_background_labels)
+                extra_background_weight=self.extra_bg_ratio*float(extra_background_count)/(features.shape[0]*features.shape[2]*features.shape[3])
                 loss_mbce=(loss_mbce+fake_loss*fake_weight+extra_background_loss*extra_background_weight)/(1.0+fake_weight+extra_background_weight)
                 loss_pkd=self.pkd_loss(features,old_features,pseudo_region,self.old_gmms)
                 loss_cont=self.contrast_loss(features,labels,self.old_prototypes)
