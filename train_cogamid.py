@@ -3,7 +3,7 @@ import torch.nn.functional as F
 from apex import amp
 from torch import distributed
 
-from cogamid_gmm import get_gmm_prototypes,restore_old_gmm_pool,sample_old_gmm_features
+from cogamid_gmm import allocate_uniform_replay_counts,calculate_client_extra_background_ratio,get_gmm_prototypes,restore_old_gmm_pool,sample_old_gmm_features
 from cogamid_losses import CoGaMiDContrastLoss,CoGaMiDPKDLoss,CoGaMiDWeightedBCELoss,calculate_cogamid_certainty
 
 
@@ -52,14 +52,19 @@ class Trainer_CoGaMiD:
             new_class_count=self.new_class_count
         ).to(device)
         self.old_gmms={}
-        self.old_feature_counts={}
         self.old_prototypes=None
         self.predicted_old_counts={}
         self.replay_counts={}
         self.extra_bg_ratio=0.0
         self.statistics_ready=False
+        if int(opts.cogamid_replay_total)<0:
+            raise ValueError('cogamid_replay_total cannot be negative')
+        if float(opts.cogamid_old_replay)<0:
+            raise ValueError('cogamid_old_replay cannot be negative')
+        if float(opts.cogamid_extra_bg_max_ratio)<0:
+            raise ValueError('cogamid_extra_bg_max_ratio cannot be negative')
         if self.step>0:
-            self.old_gmms,self.old_feature_counts=restore_old_gmm_pool(gmm_pool,self.old_classes,device)
+            self.old_gmms,_=restore_old_gmm_pool(gmm_pool,self.old_classes,device)
             self.old_prototypes=get_gmm_prototypes(self.old_gmms)
             if self.rank==0 and len(self.old_gmms)<self.old_classes-1:
                 print(f'CoGaMiD GMM pool contains {len(self.old_gmms)}/{self.old_classes-1} old classes')
@@ -107,45 +112,35 @@ class Trainer_CoGaMiD:
                 new_region=(labels_small>=self.new_class_start)&(labels_small<self.nb_current_classes)
                 statistics[-1]+=new_region.sum()
         distributed.all_reduce(statistics)
-        num_batches=max(1,len(train_loader)*distributed.get_world_size())
         self.predicted_old_counts={class_id:int(statistics[class_id].item()) for class_id in sorted(self.old_gmms)}
-        self.replay_counts={}
-        for class_id in sorted(self.old_gmms):
-            previous_count=max(1,int(self.old_feature_counts[class_id]))
-            if self.opts.overlap:
-                sample_count=max(1,(previous_count-self.predicted_old_counts[class_id])//num_batches)
-            else:
-                sample_count=max(1,previous_count//num_batches)
-            self.replay_counts[class_id]=min(sample_count,int(self.opts.cogamid_replay_max_per_class))
+        world_size=distributed.get_world_size() if distributed.is_initialized() else 1
+        global_replay_budget=int(self.opts.cogamid_replay_total)
+        local_replay_budget=global_replay_budget//world_size+int(self.rank<global_replay_budget%world_size)
+        self.replay_counts=allocate_uniform_replay_counts(
+            class_ids=self.old_gmms,
+            total_budget=local_replay_budget
+        )
         predicted_background=float(statistics[0].item())
         predicted_old_total=float(sum(self.predicted_old_counts.values()))
         new_feature_total=float(statistics[-1].item())
-        previous_background=predicted_background+predicted_old_total
-        if self.opts.overlap:
-            previous_background=previous_background*(1.0-0.01*self.new_class_count)
-            coverage_ratios=[]
-            for class_id in sorted(self.old_gmms):
-                previous_count=max(1,int(self.old_feature_counts[class_id]))
-                coverage_ratios.append(self.predicted_old_counts[class_id]/previous_count)
-            max_coverage=max(coverage_ratios) if len(coverage_ratios)>0 else 0.0
-            if max_coverage<1.0:
-                extra_background_target=previous_background-max_coverage*new_feature_total
-            else:
-                extra_background_target=previous_background-new_feature_total
-        else:
-            extra_background_target=previous_background
-        self.extra_bg_ratio=max(0.0,extra_background_target/max(1.0,predicted_background))
+        self.extra_bg_ratio=calculate_client_extra_background_ratio(
+            predicted_background=predicted_background,
+            predicted_old_total=predicted_old_total,
+            new_feature_total=new_feature_total,
+            max_ratio=self.opts.cogamid_extra_bg_max_ratio
+        )
         self.statistics_ready=True
         if self.rank==0:
             print(f'CoGaMiD old-class counts on this client: {self.predicted_old_counts}')
-            print(f'CoGaMiD GMM replay counts per batch: {self.replay_counts}')
+            print(f'CoGaMiD local GMM replay counts per batch: {self.replay_counts}, global budget: {global_replay_budget}')
             print(f'CoGaMiD extra background ratio: {self.extra_bg_ratio}')
 
     def _make_fake_features(self):
         return sample_old_gmm_features(
             old_gmms=self.old_gmms,
             sample_counts=self.replay_counts,
-            noise_scale=self.opts.cogamid_feature_noise
+            noise_scale=self.opts.cogamid_feature_noise,
+            return_labels=True
         )
 
     def _make_extra_background_features(self,features,labels,old_logits):
@@ -196,18 +191,23 @@ class Trainer_CoGaMiD:
             loss_pkd=features.sum()*0.0
             loss_cont=features.sum()*0.0
             loss_uncer=features.sum()*0.0
+            loss_old_replay=features.sum()*0.0
             if self.step>0:
                 current_new_score=new_logits.detach().max(dim=1).values
                 old_score=old_logits[:,1:].detach().max(dim=1).values
                 negative_mask=((labels==0)&(old_score>current_new_score)).unsqueeze(1)
                 pseudo_region=pseudo_region&negative_mask
-                fake_features=self._make_fake_features()
+                fake_features,fake_class_ids=self._make_fake_features()
                 fake_weight=0.0
                 fake_loss=features.sum()*0.0
                 if fake_features is not None:
                     fake_logits=classify_cogamid_features(self.model,fake_features)
                     fake_labels=torch.zeros((1,fake_logits.shape[2],fake_logits.shape[3]),dtype=torch.long,device=self.device)
                     fake_loss=self.mbce_loss(fake_logits[:,self.new_class_start:self.new_class_start+self.new_class_count],fake_labels)
+                    loss_old_replay=F.cross_entropy(
+                        fake_logits[:,:self.old_classes],
+                        fake_class_ids.view(1,-1,1)
+                    )
                     fake_weight=float(fake_logits.shape[2]*fake_logits.shape[3])/(features.shape[0]*features.shape[2]*features.shape[3])
                 extra_background_features=self._make_extra_background_features(features,labels,old_logits)
                 extra_background_weight=0.0
@@ -226,7 +226,7 @@ class Trainer_CoGaMiD:
                 uncertain_region=(~foreground).float()
                 loss_uncer=((1.0-certainty)*uncertain_region).pow(2).mean()
             weighted_mbce=self.opts.cogamid_mbce*loss_mbce
-            regularization_loss=self.opts.cogamid_pkd*loss_pkd+self.opts.cogamid_cont*loss_cont+self.opts.cogamid_uncer*loss_uncer
+            regularization_loss=self.opts.cogamid_pkd*loss_pkd+self.opts.cogamid_cont*loss_cont+self.opts.cogamid_uncer*loss_uncer+self.opts.cogamid_old_replay*loss_old_replay
             loss_total=weighted_mbce+regularization_loss
             with amp.scale_loss(loss_total,optim) as scaled_loss:
                 scaled_loss.backward()
@@ -238,7 +238,7 @@ class Trainer_CoGaMiD:
             interval_loss+=loss_total.item()
             if (cur_step+1)%print_int==0 and self.rank==0:
                 print(f'Epoch {cur_epoch+1}, Batch {cur_step+1}/{len(train_loader)}, Loss={interval_loss/print_int}')
-                print(f'Loss made of: MBCE {weighted_mbce}, PKD {loss_pkd}, Cont {loss_cont}, Uncer {loss_uncer}')
+                print(f'Loss made of: MBCE {weighted_mbce}, PKD {loss_pkd}, Cont {loss_cont}, Uncer {loss_uncer}, OldReplay {loss_old_replay}')
                 interval_loss=0.0
         class_loss=torch.tensor(class_loss_sum,device=self.device)
         regularization_loss=torch.tensor(regularization_loss_sum,device=self.device)
