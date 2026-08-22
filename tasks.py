@@ -46,6 +46,15 @@ tasks_ade = {
 def get_task_list():
     return list(tasks_voc.keys()) + list(tasks_ade.keys())
 
+def get_task_steps(dataset,name):
+    if dataset=='voc':
+        task_dict=tasks_voc[name]
+    elif dataset=='ade':
+        task_dict=tasks_ade[name]
+    else:
+        raise NotImplementedError
+    return len(task_dict)
+
 
 def get_task_labels(dataset, name, step):
     if dataset == 'voc':

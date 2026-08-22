@@ -98,6 +98,7 @@ def args_parser():
     parser.add_argument('--add_clients', type=int, default=4, help='the number of new add clients for each step') 
     parser.add_argument('--local_clients', type=int, default=4, help='the number of selected clients in each round')  
     parser.add_argument('--gmm_clients',type=int,default=10,help='the number of coverage-aware clients selected for post-step GMM construction')
+    parser.add_argument('--fit_final_gmm',action='store_true',default=False,help='fit the final task GMM even though no later task will use it')
     parser.add_argument('--epochs_global', type=int, default=25, help='total number of global rounds') 
     parser.add_argument('--steps_global', type=int, default=5, help='the global rounds for each step (task)') 
     parser.add_argument("--resume_step",type=int,default=0,help="first task step to train when resuming CoGaMiD")

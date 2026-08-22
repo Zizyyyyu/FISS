@@ -223,6 +223,7 @@ def main(args):
 
     setup_seed(args.seed) 
     use_cogamid=args.incremental_method=='CoGaMiD'
+    final_task_step=tasks.get_task_steps(args.dataset,args.task)-1
     resume_step=int(args.resume_step)
     rebuild_gmm_step=int(args.rebuild_gmm_step)
     if resume_step<0:
@@ -326,6 +327,8 @@ def main(args):
 
         current_step = ep_g // args.steps_global
         is_task_final_round=((ep_g+1)%args.steps_global==0)
+        is_final_task_step=current_step==final_task_step
+        should_build_gmm=is_task_final_round and (not is_final_task_step or args.fit_final_gmm)
 
         if current_step != old_step: 
             test_dst, n_classes = get_testset(args, current_step)
@@ -424,7 +427,9 @@ def main(args):
             print(f'global model saved to {step_checkpoint_path} before GMM construction')
             if current_step==0 and args.name!="RCIL" and args.base_weights==False:
                 torch.save(model_g.state_dict(),f"{args.checkpoint}/{args.dataset}_{args.task}_base_step_{current_step}.pth")
-        if use_cogamid and is_task_final_round:
+        if use_cogamid and is_task_final_round and is_final_task_step and not args.fit_final_gmm and rank==0:
+            print(f'skip final step {current_step} GMM construction because no later task will use it')
+        if use_cogamid and should_build_gmm:
             global_gmm_pool=collect_global_gmm_pool(
                 args=args,
                 models=models,
