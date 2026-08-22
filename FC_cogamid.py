@@ -11,6 +11,7 @@ import tasks
 import utils
 from FC import FC_model
 from client_gmm import build_client_gmm_upload,collect_client_class_features
+from fiss_pseudo import find_fiss_entropy_thresholds,get_fiss_entropy_pseudo_labels
 from myNetwork_cogamid import make_model_cogamid
 from train_cogamid import Trainer_CoGaMiD
 
@@ -23,6 +24,10 @@ class FC_model_CoGaMiD(FC_model):
 
     def set_gmm_pool(self,gmm_pool):
         self.gmm_pool=copy.deepcopy(gmm_pool)
+
+    def release_step_dataset(self,current_step):
+        if self.learned_step==int(current_step):
+            self.current_trainset=None
 
     def beforeTrain(self,args,current_step):
         if int(current_step)!=self.learned_step:
@@ -163,7 +168,7 @@ class FC_model_CoGaMiD(FC_model):
         if self.rank!=0:
             return None
         current_step=int(current_step)
-        if self.learned_step!=current_step:
+        if self.learned_step!=current_step or self.current_trainset is None:
             self.beforeTrain(args,current_step)
         if self.current_trainset is None:
             raise ValueError(f'client {self.client_index} has no current_trainset')
@@ -193,7 +198,22 @@ class FC_model_CoGaMiD(FC_model):
             if hasattr(old_model,'in_eval'):
                 old_model.in_eval=True
         class_accumulator=None
+        pseudo_thresholds=None
+        max_entropy=None
         try:
+            if old_classes>1:
+                pseudo_nb_bins=100 if args.pseudo_nb_bins is None else int(args.pseudo_nb_bins)
+                pseudo_thresholds,max_entropy=find_fiss_entropy_thresholds(
+                    old_model=old_model,
+                    data_loader=gmm_loader,
+                    old_classes=old_classes,
+                    nb_current_classes=nb_current_classes,
+                    target_portion=args.max_portion,
+                    device=self.device,
+                    base_threshold=args.threshold,
+                    nb_bins=pseudo_nb_bins,
+                    sync_distributed=False
+                )
             class_accumulator=collect_client_class_features(
                 current_model=current_model,
                 old_model=old_model,
@@ -201,7 +221,8 @@ class FC_model_CoGaMiD(FC_model):
                 device=self.device,
                 old_classes=old_classes,
                 nb_current_classes=nb_current_classes,
-                pseudo_threshold=args.gmm_pseudo_threshold,
+                pseudo_thresholds=pseudo_thresholds,
+                max_entropy=max_entropy,
                 max_features=args.gmm_max_features
             )
             client_upload=build_client_gmm_upload(
@@ -231,3 +252,88 @@ class FC_model_CoGaMiD(FC_model):
             reserved=torch.cuda.memory_reserved(self.device)/1024**3
             print(f'CUDA memory rank {self.rank} after client {self.client_index} GMM cleanup: allocated={allocated:.2f}GB, reserved={reserved:.2f}GB, apex_cache_entries={apex_cache_entries}')
         return client_upload
+
+    def build_gmm_coverage_report(self,args,old_global_model,current_step):
+        if self.rank!=0:
+            return None
+        current_step=int(current_step)
+        if self.learned_step!=current_step or self.current_trainset is None:
+            self.beforeTrain(args,current_step)
+        if self.current_trainset is None:
+            raise ValueError(f'client {self.client_index} has no current_trainset')
+        per_task_classes=tasks.get_per_task_classes(args.dataset,args.task,current_step)
+        old_classes=sum(per_task_classes[:-1])
+        nb_current_classes=sum(per_task_classes)
+        gmm_batch_size=self.batch_size if args.gmm_batch_size is None else int(args.gmm_batch_size)
+        if gmm_batch_size<=0:
+            raise ValueError('gmm_batch_size must be greater than 0')
+        coverage_loader=data.DataLoader(
+            self.current_trainset,
+            batch_size=gmm_batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            drop_last=False
+        )
+        old_model=None
+        pseudo_thresholds=None
+        max_entropy=None
+        if old_classes>1:
+            if old_global_model is None:
+                raise ValueError('old_global_model cannot be None when old classes exist')
+            old_model=copy.deepcopy(old_global_model).to(self.device)
+            old_model.eval()
+            if hasattr(old_model,'in_eval'):
+                old_model.in_eval=True
+        class_counts=torch.zeros(nb_current_classes,dtype=torch.long,device=self.device)
+        try:
+            if old_classes>1:
+                pseudo_nb_bins=100 if args.pseudo_nb_bins is None else int(args.pseudo_nb_bins)
+                pseudo_thresholds,max_entropy=find_fiss_entropy_thresholds(
+                    old_model=old_model,
+                    data_loader=coverage_loader,
+                    old_classes=old_classes,
+                    nb_current_classes=nb_current_classes,
+                    target_portion=args.max_portion,
+                    device=self.device,
+                    base_threshold=args.threshold,
+                    nb_bins=pseudo_nb_bins,
+                    sync_distributed=False
+                )
+            with torch.no_grad():
+                for images,labels in coverage_loader:
+                    images=images.to(self.device,dtype=torch.float32,non_blocking=True)
+                    labels=labels.to(self.device,dtype=torch.long,non_blocking=True)
+                    first_new_class=max(1,old_classes)
+                    for class_id in range(first_new_class,nb_current_classes):
+                        class_counts[class_id]+=(labels==class_id).sum()
+                    if old_classes>1:
+                        old_logits,_=old_model(images,ret_intermediate=True)
+                        old_predictions,valid_pseudo=get_fiss_entropy_pseudo_labels(
+                            old_logits=old_logits,
+                            thresholds=pseudo_thresholds,
+                            max_entropy=max_entropy
+                        )
+                        eligible_old_region=labels<old_classes
+                        for class_id in range(1,old_classes):
+                            class_counts[class_id]+=(eligible_old_region&(old_predictions==class_id)&valid_pseudo).sum()
+            candidate_counts={
+                class_id:int(class_counts[class_id].item())
+                for class_id in range(1,nb_current_classes)
+                if int(class_counts[class_id].item())>0
+            }
+            return {
+                'client_id':self.client_index,
+                'step':current_step,
+                'class_counts':candidate_counts
+            }
+        finally:
+            if old_model is not None:
+                old_model.to('cpu')
+            apex_handle=getattr(getattr(amp,'_amp_state',None),'handle',None)
+            if apex_handle is not None:
+                apex_handle._clear_cache()
+            del class_counts
+            del coverage_loader
+            del old_model
+            gc.collect()
+            torch.cuda.empty_cache()

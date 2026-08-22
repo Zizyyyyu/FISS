@@ -65,6 +65,10 @@ def modify_command_options(opts):
         if opts.incremental_method == 'CoGaMiD':
             if opts.cogamid_pos_weight is None:
                 opts.cogamid_pos_weight = 4.0 if opts.dataset=='voc' else 30.0
+            opts.pseudo='entropy'
+            opts.threshold=0.001
+            opts.classif_adaptive_factor=True
+            opts.out_dis=True
             if opts.name=='OURS':
                 opts.name='CoGaMiD'
 
@@ -93,9 +97,11 @@ def args_parser():
     parser.add_argument('--num_clients', type=int, default=10, help='initial number of clients') 
     parser.add_argument('--add_clients', type=int, default=4, help='the number of new add clients for each step') 
     parser.add_argument('--local_clients', type=int, default=4, help='the number of selected clients in each round')  
+    parser.add_argument('--gmm_clients',type=int,default=10,help='the number of coverage-aware clients selected for post-step GMM construction')
     parser.add_argument('--epochs_global', type=int, default=25, help='total number of global rounds') 
     parser.add_argument('--steps_global', type=int, default=5, help='the global rounds for each step (task)') 
     parser.add_argument("--resume_step",type=int,default=0,help="first task step to train when resuming CoGaMiD")
+    parser.add_argument("--rebuild_gmm_step",type=int,default=-1,help="rebuild only the GMM pool for this completed CoGaMiD step")
     parser.add_argument("--distributed_timeout_hours",type=float,default=6.0,help="distributed collective timeout in hours")
     parser.add_argument("--seed", type=int, default=2023, help="random seed (default: 2023)")
     parser.add_argument("--use_entropy_detection", action="store_true", default=False)
@@ -104,7 +110,7 @@ def args_parser():
     parser.add_argument("--gmm_min_features",type=int,default=30,help="minimum number of features required to fit a class GMM")
     parser.add_argument("--gmm_max_features",type=int,default=20000,help="maximum number of sampled features used to fit each class GMM")
     parser.add_argument("--gmm_batch_size",type=int,default=None,help="batch size used only for client GMM feature extraction")
-    parser.add_argument("--gmm_pseudo_threshold",type=float,default=0.7,help="minimum old-model confidence for accepting an old-class pseudo label")
+    parser.add_argument("--gmm_pseudo_threshold",type=float,default=0.7,help="deprecated fixed pseudo-label threshold kept for script compatibility")
     parser.add_argument("--gmm_em_iters",type=int,default=30,help="maximum number of EM iterations to fit a GMM")
     parser.add_argument("--cogamid_mbce",type=float,default=1.0,help="weight of CoGaMiD weighted BCE loss")
     parser.add_argument("--cogamid_pkd",type=float,default=5.0,help="weight of CoGaMiD probabilistic knowledge distillation loss")

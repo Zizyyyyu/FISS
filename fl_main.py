@@ -76,6 +76,139 @@ def get_testset(opts, step):
     return test_dst, len(labels_cum)
 
 
+def select_coverage_gmm_clients(client_reports,gmm_clients,old_classes,nb_current_classes):
+    gmm_clients=int(gmm_clients)
+    if gmm_clients<=0:
+        raise ValueError('gmm_clients must be greater than 0')
+    reports={}
+    for report in client_reports:
+        if report is None:
+            continue
+        client_id=int(report['client_id'])
+        reports[client_id]={int(class_id):int(count) for class_id,count in report.get('class_counts',{}).items() if int(count)>0}
+    if len(reports)==0:
+        raise ValueError('client_reports do not contain any valid client')
+    selection_count=min(len(reports),gmm_clients)
+    selected=[]
+    available=set(reports)
+
+    def add_clients_for_coverage(target_classes):
+        uncovered={class_id for class_id in target_classes if any(report.get(class_id,0)>0 for report in reports.values())}
+        for client_id in selected:
+            uncovered={class_id for class_id in uncovered if reports[client_id].get(class_id,0)<=0}
+        while len(uncovered)>0 and len(selected)<selection_count and len(available)>0:
+            best_client=max(
+                available,
+                key=lambda client_id:(
+                    sum(reports[client_id].get(class_id,0)>0 for class_id in uncovered),
+                    sum(reports[client_id].get(class_id,0) for class_id in uncovered),
+                    sum(reports[client_id].values()),
+                    -client_id
+                )
+            )
+            covered={class_id for class_id in uncovered if reports[best_client].get(class_id,0)>0}
+            if len(covered)==0:
+                break
+            selected.append(best_client)
+            available.remove(best_client)
+            uncovered-=covered
+
+    new_class_start=max(1,int(old_classes))
+    add_clients_for_coverage(range(new_class_start,int(nb_current_classes)))
+    add_clients_for_coverage(range(1,int(old_classes)))
+    while len(selected)<selection_count and len(available)>0:
+        best_client=max(
+            available,
+            key=lambda client_id:(sum(reports[client_id].values()),-client_id)
+        )
+        selected.append(best_client)
+        available.remove(best_client)
+    return selected
+
+
+def collect_global_gmm_pool(args,models,model_g,old_global_model,global_gmm_pool,current_step,num_clients,rank,device):
+    gmm_pool_path=f"{args.checkpoint}/{args.dataset}_{args.task}_{args.name}_gmm_pool_step_{current_step}.pth"
+    distributed.barrier()
+    if rank==0:
+        print(f'building client GMM uploads for step {current_step}')
+        python_rng_state=random.getstate()
+        numpy_rng_state=np.random.get_state()
+        torch_rng_state=torch.get_rng_state()
+        cuda_rng_state=torch.cuda.get_rng_state(device)
+        client_uploads=[]
+        try:
+            selection_count=min(int(num_clients),int(args.gmm_clients))
+            if selection_count==int(num_clients):
+                gmm_client_ids=list(range(num_clients))
+            else:
+                print(f'collect lightweight class coverage from {num_clients} clients')
+                client_reports=[]
+                for client_id in range(num_clients):
+                    client_report=models[client_id].build_gmm_coverage_report(
+                        args=args,
+                        old_global_model=old_global_model,
+                        current_step=current_step
+                    )
+                    client_reports.append(client_report)
+                    print(f'client {client_id} GMM coverage report finished')
+                per_task_classes=tasks.get_per_task_classes(args.dataset,args.task,current_step)
+                old_classes=sum(per_task_classes[:-1])
+                nb_current_classes=sum(per_task_classes)
+                gmm_client_ids=select_coverage_gmm_clients(
+                    client_reports=client_reports,
+                    gmm_clients=args.gmm_clients,
+                    old_classes=old_classes,
+                    nb_current_classes=nb_current_classes
+                )
+                report_by_client={int(report['client_id']):report.get('class_counts',{}) for report in client_reports}
+                available_classes={int(class_id) for report in client_reports for class_id,count in report.get('class_counts',{}).items() if int(count)>0}
+                selected_classes={int(class_id) for client_id in gmm_client_ids for class_id,count in report_by_client[client_id].items() if int(count)>0}
+                available_new={class_id for class_id in available_classes if class_id>=max(1,old_classes)}
+                available_old={class_id for class_id in available_classes if 0<class_id<old_classes}
+                print(f'GMM client coverage: new {len(selected_classes&available_new)}/{len(available_new)}, old {len(selected_classes&available_old)}/{len(available_old)}')
+                missing_new=sorted(available_new-selected_classes)
+                missing_old=sorted(available_old-selected_classes)
+                if len(missing_new)>0:
+                    print(f'warning: selected GMM clients miss new classes {missing_new}')
+                if len(missing_old)>0:
+                    print(f'warning: selected GMM clients miss old classes {missing_old}')
+                del client_reports
+            print(f'select {len(gmm_client_ids)} clients only for GMM construction')
+            print(gmm_client_ids)
+            for client_id in gmm_client_ids:
+                client_upload=models[client_id].build_gmm_upload(
+                    args=args,
+                    current_global_model=model_g,
+                    old_global_model=old_global_model,
+                    current_step=current_step
+                )
+                client_uploads.append(client_upload)
+                print(f'client {client_id} GMM upload finished')
+            global_gmm_pool,gmm_winners=update_global_gmm_pool(
+                global_gmm_pool=global_gmm_pool,
+                client_uploads=client_uploads,
+                current_step=current_step
+            )
+            torch.save(global_gmm_pool,gmm_pool_path)
+            print(f'global GMM pool updated with {len(gmm_winners)} class winners')
+            print(f'global GMM pool saved to {gmm_pool_path}')
+            del client_uploads
+            del gmm_winners
+        finally:
+            random.setstate(python_rng_state)
+            np.random.set_state(numpy_rng_state)
+            torch.set_rng_state(torch_rng_state)
+            torch.cuda.set_rng_state(cuda_rng_state,device)
+    distributed.barrier()
+    for client_id in range(num_clients):
+        models[client_id].release_step_dataset(current_step)
+    if rank!=0:
+        global_gmm_pool=torch.load(gmm_pool_path,map_location='cpu')
+    for client_model in models:
+        client_model.set_gmm_pool(global_gmm_pool)
+    return global_gmm_pool
+
+
 
 def main(args):
 
@@ -91,12 +224,17 @@ def main(args):
     setup_seed(args.seed) 
     use_cogamid=args.incremental_method=='CoGaMiD'
     resume_step=int(args.resume_step)
+    rebuild_gmm_step=int(args.rebuild_gmm_step)
     if resume_step<0:
         raise ValueError('resume_step cannot be negative')
     if resume_step>0 and not use_cogamid:
         raise ValueError('resume_step is currently supported only for CoGaMiD')
+    if rebuild_gmm_step>=0 and not use_cogamid:
+        raise ValueError('rebuild_gmm_step is currently supported only for CoGaMiD')
+    if rebuild_gmm_step>=0 and resume_step>0:
+        raise ValueError('rebuild_gmm_step and resume_step cannot be used together')
     previous_step=resume_step-1
-    initial_model_step=previous_step if resume_step>0 else 0
+    initial_model_step=rebuild_gmm_step if rebuild_gmm_step>=0 else previous_step if resume_step>0 else 0
 
     args.inital_nb_classes = tasks.get_per_task_classes(args.dataset,args.task,step=0)[0] 
 
@@ -125,6 +263,44 @@ def main(args):
 
     old_step=-1
     start_global_epoch=0
+    if rebuild_gmm_step>=0:
+        current_step=rebuild_gmm_step
+        model_rebuild_path=f'{args.checkpoint}/{args.dataset}_{args.task}_{args.name}_step_{current_step}.pth'
+        if not os.path.exists(model_rebuild_path):
+            raise FileNotFoundError(f'GMM rebuild model checkpoint does not exist: {model_rebuild_path}')
+        model_g.load_state_dict(torch.load(model_rebuild_path,map_location='cpu'),strict=True)
+        num_clients=args.num_clients+args.add_clients*current_step
+        if num_clients>len(models):
+            raise ValueError('rebuild_gmm_step requires more clients than the configured client model capacity')
+        if current_step>0:
+            previous_model_path=f'{args.checkpoint}/{args.dataset}_{args.task}_{args.name}_step_{current_step-1}.pth'
+            previous_gmm_path=f'{args.checkpoint}/{args.dataset}_{args.task}_{args.name}_gmm_pool_step_{current_step-1}.pth'
+            if not os.path.exists(previous_model_path):
+                raise FileNotFoundError(f'previous model checkpoint does not exist: {previous_model_path}')
+            if not os.path.exists(previous_gmm_path):
+                raise FileNotFoundError(f'previous GMM pool does not exist: {previous_gmm_path}')
+            old_global_model=make_model_cogamid(args,classes=tasks.get_per_task_classes(args.dataset,args.task,step=current_step-1))
+            old_global_model.load_state_dict(torch.load(previous_model_path,map_location='cpu'),strict=True)
+            old_global_model.eval()
+            for param in old_global_model.parameters():
+                param.requires_grad=False
+            global_gmm_pool=torch.load(previous_gmm_path,map_location='cpu')
+        if rank==0:
+            print(f'rebuild only the GMM pool for completed step {current_step}')
+            print(f'loaded model checkpoint from {model_rebuild_path}')
+        global_gmm_pool=collect_global_gmm_pool(
+            args=args,
+            models=models,
+            model_g=model_g,
+            old_global_model=old_global_model,
+            global_gmm_pool=global_gmm_pool,
+            current_step=current_step,
+            num_clients=num_clients,
+            rank=rank,
+            device=device
+        )
+        distributed.barrier()
+        return
     if resume_step>0:
         model_resume_path=f'{args.checkpoint}/{args.dataset}_{args.task}_{args.name}_step_{previous_step}.pth'
         gmm_resume_path=f'{args.checkpoint}/{args.dataset}_{args.task}_{args.name}_gmm_pool_step_{previous_step}.pth'
@@ -249,46 +425,17 @@ def main(args):
             if current_step==0 and args.name!="RCIL" and args.base_weights==False:
                 torch.save(model_g.state_dict(),f"{args.checkpoint}/{args.dataset}_{args.task}_base_step_{current_step}.pth")
         if use_cogamid and is_task_final_round:
-            gmm_pool_path=f"{args.checkpoint}/{args.dataset}_{args.task}_{args.name}_gmm_pool_step_{current_step}.pth"
-            distributed.barrier()
-            if rank==0:
-                print(f'building client GMM uploads for step {current_step}')
-                python_rng_state=random.getstate()
-                numpy_rng_state=np.random.get_state()
-                torch_rng_state=torch.get_rng_state()
-                cuda_rng_state=torch.cuda.get_rng_state(device)
-                client_uploads=[]
-                try:
-                    for client_id in range(num_clients):
-                        client_upload=models[client_id].build_gmm_upload(
-                            args=args,
-                            current_global_model=model_g,
-                            old_global_model=old_global_model,
-                            current_step=current_step
-                        )
-                        client_uploads.append(client_upload)
-                        print(f'client {client_id} GMM upload finished')
-
-                    global_gmm_pool,gmm_winners=update_global_gmm_pool(
-                        global_gmm_pool=global_gmm_pool,
-                        client_uploads=client_uploads,
-                        current_step=current_step
-                    )
-                    torch.save(global_gmm_pool,gmm_pool_path)
-                    print(f'global GMM pool updated with {len(gmm_winners)} class winners')
-                    print(f'global GMM pool saved to {gmm_pool_path}')
-                    del client_uploads
-                    del gmm_winners
-                finally:
-                    random.setstate(python_rng_state)
-                    np.random.set_state(numpy_rng_state)
-                    torch.set_rng_state(torch_rng_state)
-                    torch.cuda.set_rng_state(cuda_rng_state,device)
-            distributed.barrier()
-            if rank!=0:
-                global_gmm_pool=torch.load(gmm_pool_path,map_location='cpu')
-            for client_model in models:
-                client_model.set_gmm_pool(global_gmm_pool)
+            global_gmm_pool=collect_global_gmm_pool(
+                args=args,
+                models=models,
+                model_g=model_g,
+                old_global_model=old_global_model,
+                global_gmm_pool=global_gmm_pool,
+                current_step=current_step,
+                num_clients=num_clients,
+                rank=rank,
+                device=device
+            )
         if use_cogamid and is_task_final_round:
             distributed.barrier()
         old_step = current_step

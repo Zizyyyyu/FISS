@@ -5,6 +5,7 @@ from torch import distributed
 
 from cogamid_gmm import get_gmm_prototypes,restore_old_gmm_pool,sample_old_gmm_features
 from cogamid_losses import CoGaMiDContrastLoss,CoGaMiDPKDLoss,CoGaMiDWeightedBCELoss,calculate_cogamid_certainty
+from fiss_pseudo import find_fiss_entropy_thresholds,get_fiss_entropy_pseudo_labels
 
 
 def unwrap_cogamid_model(model):
@@ -58,6 +59,8 @@ class Trainer_CoGaMiD:
         self.replay_counts={}
         self.extra_bg_ratio=0.0
         self.statistics_ready=False
+        self.pseudo_thresholds=None
+        self.max_entropy=None
         if self.step>0:
             self.old_gmms,self.old_feature_counts=restore_old_gmm_pool(gmm_pool,self.old_classes,device)
             self.old_prototypes=get_gmm_prototypes(self.old_gmms)
@@ -70,8 +73,21 @@ class Trainer_CoGaMiD:
                 self.statistics_ready=bool(trainer_state.get('statistics_ready',False))
 
     def before(self,cur_epoch,train_loader):
-        if self.step>0 and not self.statistics_ready:
-            self._compute_client_statistics(train_loader)
+        if self.step>0:
+            target_portion=min(self.opts.init_portion+self.opts.portion_step*cur_epoch,self.opts.max_portion)
+            pseudo_nb_bins=100 if self.opts.pseudo_nb_bins is None else int(self.opts.pseudo_nb_bins)
+            self.pseudo_thresholds,self.max_entropy=find_fiss_entropy_thresholds(
+                old_model=self.model_old,
+                data_loader=train_loader,
+                old_classes=self.old_classes,
+                nb_current_classes=self.nb_current_classes,
+                target_portion=target_portion,
+                device=self.device,
+                base_threshold=self.opts.threshold,
+                nb_bins=pseudo_nb_bins
+            )
+            if not self.statistics_ready:
+                self._compute_client_statistics(train_loader)
         return None
 
     def state_dict(self):
@@ -97,12 +113,15 @@ class Trainer_CoGaMiD:
                 old_features=old_intermediate['pre_logits']
                 labels_small=F.interpolate(labels.unsqueeze(1).float(),size=old_features.shape[-2:],mode='nearest').squeeze(1).long()
                 old_logits_small=F.interpolate(old_logits.detach().float(),size=old_features.shape[-2:],mode='bilinear',align_corners=False)
-                old_probabilities=torch.softmax(old_logits_small,dim=1)
-                old_confidences,old_predictions=old_probabilities.max(dim=1)
+                old_predictions,valid_pseudo=get_fiss_entropy_pseudo_labels(
+                    old_logits=old_logits_small,
+                    thresholds=self.pseudo_thresholds,
+                    max_entropy=self.max_entropy
+                )
                 eligible_old_region=labels_small<self.old_classes
                 statistics[0]+=((labels_small==0)&(old_predictions==0)).sum()
                 for class_id in self.old_gmms:
-                    class_mask=eligible_old_region&(old_predictions==class_id)&(old_confidences>=float(self.opts.gmm_pseudo_threshold))
+                    class_mask=eligible_old_region&(old_predictions==class_id)&valid_pseudo
                     statistics[class_id]+=class_mask.sum()
                 new_region=(labels_small>=self.new_class_start)&(labels_small<self.nb_current_classes)
                 statistics[-1]+=new_region.sum()
@@ -186,9 +205,12 @@ class Trainer_CoGaMiD:
                 with torch.no_grad():
                     old_logits,old_intermediate=self.model_old(images,ret_intermediate=True)
                     old_features=old_intermediate['pre_logits']
-                    old_probabilities=torch.softmax(old_logits,dim=1)
-                    old_confidences,old_predictions=old_probabilities.max(dim=1)
-                    pseudo_region=((labels==0)&(old_predictions>0)&(old_confidences>=float(self.opts.gmm_pseudo_threshold))).unsqueeze(1)
+                    old_predictions,valid_pseudo=get_fiss_entropy_pseudo_labels(
+                        old_logits=old_logits,
+                        thresholds=self.pseudo_thresholds,
+                        max_entropy=self.max_entropy
+                    )
+                    pseudo_region=((labels==0)&(old_predictions>0)&valid_pseudo).unsqueeze(1)
             outputs,intermediate=self.model(images,ret_intermediate=True)
             features=intermediate['pre_logits']
             new_logits=outputs[:,self.new_class_start:self.new_class_start+self.new_class_count]

@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from fiss_pseudo import get_fiss_entropy_pseudo_labels
 from utils.gmm import GaussianMixture
 
 def resize_labels_to_feature_map(labels,feature_map):
@@ -51,7 +52,7 @@ def extract_new_class_features(feature_map,labels,old_classes,nb_current_classes
         new_classes_features[class_id]=selected_features
     return new_classes_features
 
-def extract_old_class_features(feature_map,labels,old_logits,old_classes,pseudo_threshold):
+def extract_old_class_features(feature_map,labels,old_logits,old_classes,pseudo_thresholds,max_entropy):
     if int(old_classes)<=1:
         return {}
     if old_logits.dim()!=4:
@@ -60,8 +61,6 @@ def extract_old_class_features(feature_map,labels,old_logits,old_classes,pseudo_
         raise ValueError("old_logits and feature_map have different batch sizes")
     if old_logits.shape[1]<int(old_classes):
         raise ValueError("old_logits do not contain all old classes")
-    if not 0.0<=float(pseudo_threshold)<=1.0:
-        raise ValueError("pseudo_threshold must be between 0 and 1")
     labels_small=resize_labels_to_feature_map(labels=labels,feature_map=feature_map)
     feature_grid=feature_map_to_grid(feature_map)
     old_logits_small=F.interpolate(
@@ -71,12 +70,15 @@ def extract_old_class_features(feature_map,labels,old_logits,old_classes,pseudo_
         align_corners=False
     )
 
-    old_probabilities=torch.softmax(old_logits_small,dim=1)
-    pseudo_confidences, pseudo_labels=(old_probabilities.max(dim=1))
+    pseudo_labels,valid_pseudo=get_fiss_entropy_pseudo_labels(
+        old_logits=old_logits_small,
+        thresholds=pseudo_thresholds,
+        max_entropy=max_entropy
+    )
     eligible_old_region=(labels_small<int(old_classes))
     old_class_features = {}
     for class_id in range(1,int(old_classes)):
-        class_mask=(eligible_old_region&(pseudo_labels==class_id)&(pseudo_confidences>=float(pseudo_threshold)))
+        class_mask=(eligible_old_region&(pseudo_labels==class_id)&valid_pseudo)
         if not torch.any(class_mask):
             continue
         selected_features=feature_grid[class_mask]
@@ -84,7 +86,7 @@ def extract_old_class_features(feature_map,labels,old_logits,old_classes,pseudo_
         old_class_features[class_id]=selected_features
     return old_class_features
 
-def extract_batch_class_features(current_model,old_model,images,labels,old_classes,nb_current_classes,pseudo_threshold):
+def extract_batch_class_features(current_model,old_model,images,labels,old_classes,nb_current_classes,pseudo_thresholds,max_entropy):
     if images.dim()!=4:
         raise ValueError(f'images must have 4 dimensions B,3,H,W')
     if labels.dim()!=3:
@@ -105,7 +107,7 @@ def extract_batch_class_features(current_model,old_model,images,labels,old_class
             if "sem_logits_small" not in old_intermediate:
                 raise KeyError(f'old model didnt return sem_logits_small')
             old_logits=old_intermediate['sem_logits_small']
-            old_classes_features=extract_old_class_features(feature_map=feature_map,labels=labels,old_logits=old_logits,old_classes=old_classes,pseudo_threshold=pseudo_threshold)
+            old_classes_features=extract_old_class_features(feature_map=feature_map,labels=labels,old_logits=old_logits,old_classes=old_classes,pseudo_thresholds=pseudo_thresholds,max_entropy=max_entropy)
         batch_cls_data={}
         for class_id,class_features in old_classes_features.items():
             batch_cls_data[class_id]={
@@ -167,7 +169,7 @@ def update_class_feature_accumulator(class_accumulator,batch_cls_data,max_featur
     return class_accumulator
 
 
-def collect_client_class_features(current_model,old_model,data_loader,device,old_classes,nb_current_classes,pseudo_threshold,max_features):
+def collect_client_class_features(current_model,old_model,data_loader,device,old_classes,nb_current_classes,pseudo_thresholds,max_entropy,max_features):
     if current_model is None:
         raise ValueError('current_model cannot be None')
     if data_loader is None:
@@ -193,7 +195,8 @@ def collect_client_class_features(current_model,old_model,data_loader,device,old
                 labels=labels,
                 old_classes=old_classes,
                 nb_current_classes=nb_current_classes,
-                pseudo_threshold=pseudo_threshold
+                pseudo_thresholds=pseudo_thresholds,
+                max_entropy=max_entropy
             )
 
             class_accumulator=update_class_feature_accumulator(
