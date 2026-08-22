@@ -1,5 +1,6 @@
 import torch
 import torchvision.transforms.functional as F
+from torchvision.transforms import InterpolationMode
 import random
 import numbers
 import numpy as np
@@ -15,6 +16,12 @@ _pil_interpolation_to_str = {
     Image.LANCZOS: 'PIL.Image.LANCZOS',
     Image.HAMMING: 'PIL.Image.HAMMING',
     Image.BOX: 'PIL.Image.BOX',
+    InterpolationMode.NEAREST:'InterpolationMode.NEAREST',
+    InterpolationMode.BILINEAR:'InterpolationMode.BILINEAR',
+    InterpolationMode.BICUBIC:'InterpolationMode.BICUBIC',
+    InterpolationMode.LANCZOS:'InterpolationMode.LANCZOS',
+    InterpolationMode.HAMMING:'InterpolationMode.HAMMING',
+    InterpolationMode.BOX:'InterpolationMode.BOX',
 }
 
 
@@ -61,7 +68,7 @@ class Resize(object):
             ``PIL.Image.BILINEAR``
     """
 
-    def __init__(self, size, interpolation=Image.BILINEAR):
+    def __init__(self, size, interpolation=InterpolationMode.BILINEAR):
         assert isinstance(size, int) or (isinstance(size, collections.Iterable) and len(size) == 2)
         self.size = size
         self.interpolation = interpolation
@@ -75,9 +82,9 @@ class Resize(object):
             PIL Image: Rescaled image.
         """
         if lbl is not None:
-            return F.resize(img, self.size, self.interpolation), F.resize(lbl, self.size, Image.NEAREST)
+            return F.resize(img,self.size,self.interpolation),F.resize(lbl,self.size,InterpolationMode.NEAREST)
         else:
-            return F.resize(img, self.size, self.interpolation)
+            return F.resize(img,self.size,self.interpolation)
 
     def __repr__(self):
         interpolate_str = _pil_interpolation_to_str[self.interpolation]
@@ -491,7 +498,7 @@ class RandomResizedCrop(object):
         interpolation: Default: PIL.Image.BILINEAR
     """
 
-    def __init__(self, size, scale=(0.08, 1.0), ratio=(3. / 4., 4. / 3.), interpolation=Image.BILINEAR):
+    def __init__(self, size, scale=(0.08, 1.0), ratio=(3. / 4., 4. / 3.), interpolation=InterpolationMode.BILINEAR):
         if isinstance(size, tuple):
             self.size = size
         else:
@@ -553,10 +560,10 @@ class RandomResizedCrop(object):
         """
         i, j, h, w = self.get_params(img, self.scale, self.ratio)
         if lbl is not None:
-            return F.resized_crop(img, i, j, h, w, self.size, self.interpolation), \
-                   F.resized_crop(lbl, i, j, h, w, self.size, Image.NEAREST)
+            return F.resized_crop(img,i,j,h,w,self.size,self.interpolation), \
+                   F.resized_crop(lbl,i,j,h,w,self.size,InterpolationMode.NEAREST)
         else:
-            return F.resized_crop(img, i, j, h, w, self.size, self.interpolation)
+            return F.resized_crop(img,i,j,h,w,self.size,self.interpolation)
 
     def __repr__(self):
         interpolate_str = _pil_interpolation_to_str[self.interpolation]
